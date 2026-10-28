@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Godot Economy Extension — Mika Halbauer</title>
+  <meta name="description" content="A C++ GDExtension for Godot that gives NPCs and players a self-running economy. NPCs plan with GOAP to meet their needs and trade with each other, with no trade routes or trade logic written in advance.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="../index.html">Mika<span>.</span>dev</a>
+      <nav>
+        <a href="../index.html">Posts</a>
+        <a href="https://github.com/Yungsaas">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <a class="back" href="../index.html">← All posts</a>
+      <h1>Godot Economy Extension</h1>
+      <p class="meta">29 Oct 2026 · Mika Halbauer <span class="tag">Godot</span> <span class="tag">C++</span></p>
+      <p class="lead">An economy for Godot that runs itself. NPCs have needs, work out how to meet them and trade with each other and with the player. Nobody writes the trade routes, the shop lists or the rules for who sells what.</p>
+    </header>
+
+    <article>
+
+      <h2>The idea</h2>
+      <p>Most game economies are written in advance. The baker sells bread because a designer put bread in the baker's shop, and the caravan travels from A to B because someone drew that route. It works, but nothing in it reacts. If the baker runs out of grain, the shop is just empty.</p>
+      <p>I wanted an economy that works on its own: NPCs and players interacting with each other, where every trade happens because someone needed it, not because a route or a hand-written decision tree said so. Give each NPC needs, a wallet and a list of things it knows how to do, and let the trading come out of that.</p>
+      <p>The result is a GDExtension for Godot 4.4, written in C++. NPCs get thirsty and hungry, plan how to fix that, and buy, sell and produce along the way. Everything a designer works with (currencies, items, needs, actions and goals) is a Resource authored in the inspector, so building an economy needs no C++ at all.</p>
+
+      <figure>
+        <video src="../assets/img/Godot_Final_Demo.mp4" controls muted playsinline></video>
+        <figcaption>A farmer, a baker and a water carrier keeping each other alive. None of their trades is scripted.</figcaption>
+      </figure>
+
+      <h2>How it fits together</h2>
+      <p>The extension is split into two layers: the economy itself, and the NPCs that act in it.</p>
+
+      <h3>The economy</h3>
+      <p>An <code>EconomyManager</code> is the registry of everything that exists. <code>Currency</code> and <code>EconomyItem</code> are Resources, and everything is addressed by a string id. Definitions are kept apart from state, so content registered later, even while the game runs, works without any changes.</p>
+      <p>State lives in a <code>Wallet</code> node, which only holds balances and moves them around. Every transfer is guarded: it is refused if the sender doesn't have enough or if the receiver would go over the item's max stack, and a half-finished transfer is rolled back so nothing is ever lost or duplicated.</p>
+
+<pre><code>if (!remove_item(id, amount)) {
+    return false;
+}
+if (!other-&gt;add_item(id, amount)) {
+    // The receiver refused, give the item back so nothing is lost.
+    add_item(id, amount);
+    return false;
+}</code></pre>
+
+      <p>Each change emits <code>balance_changed</code>, and a wallet finds the manager through a group, so there is nothing to wire up. Because a wallet is just a node, the player can have one too, which matters later.</p>
+
+      <figure>
+        <video src="../assets/img/wallet_transfer_demo.mp4" controls muted playsinline></video>
+        <figcaption>Guarded transfers between wallets.</figcaption>
+      </figure>
+
+      <h3>The NPCs</h3>
+      <p>On top of the economy sit the nodes that make decisions:</p>
+      <table>
+        <tr><th>Node / Resource</th><th>Role</th></tr>
+        <tr><td><code>GoapTrader</code></td><td>The NPC. Plans, carries out steps and answers offers.</td></tr>
+        <tr><td><code>Wallet</code></td><td>What the NPC owns, and the state its planner starts from.</td></tr>
+        <tr><td><code>NeedsComponent</code> + <code>Need</code></td><td>What the NPC wants. Needs decay over time and become goals.</td></tr>
+        <tr><td><code>GoapGoal</code></td><td>A target state, such as "hold 1 water".</td></tr>
+        <tr><td><code>GoapAction</code></td><td>Something the NPC can do: trade, or produce with its own work.</td></tr>
+        <tr><td><code>GoapPlanner</code></td><td>Finds the cheapest sequence of actions that reaches a goal.</td></tr>
+        <tr><td><code>GoapPlan</code></td><td>The result: the steps, their cost, or why no plan exists.</td></tr>
+      </table>
+      <p>The minimum setup is one <code>GoapTrader</code> per NPC. It creates its <code>Wallet</code>, <code>NeedsComponent</code> and <code>GoapPlanner</code> if they are missing.</p>
+
+      <figure>
+        <img src="../assets/img/trader-scene-tree.png" alt="Scene tree of an NPC with a GoapTrader and its child nodes">
+        <figcaption>A trader in the scene tree.</figcaption>
+      </figure>
+
+      <h3>The extension decides, the game carries it out</h3>
+      <p>The extension never moves an NPC or plays an animation. It decides <em>what</em> happens; the game decides <em>how it looks</em>. When a step starts, the trader emits <code>step_started</code> with the action and, for trades, the partner. The game does whatever it wants (walk over, play an animation, wait) and then reports back:</p>
+
+<pre><code>func _ready() -&gt; void:
+	$GoapTrader.get_wallet().add_currency("gold", 10.0)
+	$GoapTrader.step_started.connect(_on_step_started)
+
+func _on_step_started(action: GoapAction, partner: GoapTrader) -&gt; void:
+	# Walk, animate, wait... then report back:
+	$GoapTrader.complete_step()</code></pre>
+
+      <p>Only on <code>complete_step()</code> does the extension apply the effects to the wallets and plan the next step. If something goes wrong (the partner walked away, it took too long) the game calls <code>fail_step(reason)</code>. The trader then avoids that action for a while and plans around it. For NPCs nobody is looking at, <code>instant_steps</code> completes every step the moment it starts, without any game code at all.</p>
+
+      <h2>Why GOAP</h2>
+      <p>For the decision-making I used Goal-Oriented Action Planning (GOAP), the technique Jeff Orkin made famous with the AI of F.E.A.R. The main alternative was a Hierarchical Task Network (HTN). The deciding factor was that this extension can't know the content it will run with.</p>
+      <p>An HTN's hierarchy has to encode which item satisfies which need and how to get it. But here the items are defined by whoever uses the extension, after it has been compiled. A GOAP action, on the other hand, only says what it needs and what it changes, written in item ids and amounts. It never refers to the goal it serves, so it stays correct for any content added later. That is exactly the property an economy without pre-written logic needs.</p>
+      <p>The mapping onto an economy is direct:</p>
+      <ul>
+        <li><strong>World state</strong> is the contents of the NPC's wallet.</li>
+        <li><strong>Actions</strong> are trades or production.</li>
+        <li><strong>Goals</strong> come from needs, ordered by how urgent the need is.</li>
+      </ul>
+      <p>Every action is described by three amount lists. Here is how the extension documents it:</p>
+
+<pre><code>//   requires: id -&gt; amount that must be held, but is not used up (a tool, a licence)
+//   consumes: id -&gt; amount that must be held and is removed
+//   produces: id -&gt; amount that is added
+//
+//   Farm grain    (custom): produces {grain: 2}
+//   Bake bread    (custom): consumes {grain: 2}, produces {bread: 1}
+//   Chop wood     (custom): requires {axe: 1},   produces {wood: 1}
+//   Buy water     (trade):  consumes {gold: 2},  produces {water: 1}</code></pre>
+
+      <p>A trade action needs a partner who gives what it produces and receives what it consumes. A custom action is carried out by the NPC itself. That one shape covers farming, baking, drawing water and buying, without any of them being special-cased in code.</p>
+
+      <figure>
+        <img src="../assets/img/goap-action-bake-bread.png" alt="Inspector view of a GoapAction for baking bread">
+        <figcaption>Baking bread is just an action with inputs and outputs.</figcaption>
+      </figure>
+
+      <figure>
+        <img src="../assets/img/needs-component-needs.png" alt="Inspector view of a NeedsComponent with its needs">
+        <figcaption>Needs configured on a NeedsComponent.</figcaption>
+      </figure>
+
+      <p>The planner is an A* forward search over wallet states:</p>
+      <ul>
+        <li>The state is stored as integers counted in thousandths, so decimal amounts stay exact and states hash consistently.</li>
+        <li>The heuristic is admissible, so the planner returns the cheapest plan.</li>
+        <li>The search always ends, limited by <code>max_depth</code> and <code>max_explored_states</code>, and a failed plan says why it failed.</li>
+      </ul>
+      <p>When data isn't enough, a script extending <code>GoapAction</code> can define <code>_is_available(trader)</code> or <code>_get_cost(trader)</code>, for example to make an action more expensive when the NPC is far away. I chose script overrides over a Callable property because a Callable can't be set in the inspector, which would have broken the whole "no code needed" idea.</p>
+
+      <h2>Deciding whether to accept a trade</h2>
+      <p>Planning answers "what should I do next?". But traders also get offers, from other NPCs and from the player, and "should I accept this?" is a different question. The answer can't come from a separate set of trade rules either: rules don't know the plan, so an NPC could happily sell exactly what its next step needs.</p>
+      <p>So the trader asks its planner. It plans its current goal twice, once as things are and once on a copy of its state with the offer applied, and compares the two costs:</p>
+
+<pre><code>// What the plan would cost after the offer: plan on a copy of the state with the offer applied.
+Dictionary state = planner-&gt;build_world_state(wallet);
+// ... subtract what this trader gives, add what it receives ...
+plan_after = planner-&gt;plan_from_state(goal, state, actions, this, penalties);
+
+if (cost_after &lt; cost_now - COST_EPSILON) {
+    // Accept: the plan gets cheaper, or the goal becomes reachable.
+}
+if (cost_after &gt; cost_now + COST_EPSILON) {
+    if (cost_after &gt;= UNREACHABLE) {
+        // Something this trader cannot replace is never sold, whatever the price.
+    }
+    // The plan still works but needs more work. Accept if the payment covers that work.
+    const float work_price = (cost_after - cost_now) * work_value;
+}
+// The plan does not change: decide by value, so surplus is sold for a fair price.</code></pre>
+
+      <p>That gives four outcomes:</p>
+      <ul>
+        <li><strong>The plan gets cheaper:</strong> accept.</li>
+        <li><strong>The plan gets more expensive but still works:</strong> accept if the payment covers the extra work, priced by <code>work_value</code>.</li>
+        <li><strong>The goal becomes unreachable:</strong> refuse, whatever the price.</li>
+        <li><strong>The plan doesn't change:</strong> decide by value, so surplus is sold at a fair price.</li>
+      </ul>
+      <p>Every answer comes with a readable reason, such as the plan getting cheaper with both costs listed, which the demo shows above the NPC's head. A bonus of planning this way: when an offer is accepted, the plan computed while evaluating it already starts from the new state, so the trader can move on without searching again.</p>
+
+      <figure>
+        <video src="../assets/img/sell-first-to-afford.mp4" controls muted playsinline></video>
+        <figcaption>An NPC selling first so it can afford what it actually needs.</figcaption>
+      </figure>
+
+      <p>An NPC with no urgent need still needs something to judge offers against. Otherwise trade only happens when both sides happen to want exactly what the other has (the "double coincidence of wants" that Jevons described as the problem money solves), and the economy stalls. So traders can have a fallback goal, for example "keep 2 water and 10 gold", which is always planned last.</p>
+
+      <figure>
+        <img src="../assets/img/fallback-goal-inspector.png" alt="Inspector view of a trader's fallback goal">
+        <figcaption>A fallback goal set in the inspector.</figcaption>
+      </figure>
+
+      <h3>Trading as a player</h3>
+      <p>Because offers are judged against the NPC's own plan, the player doesn't need a special shop interface. <code>receive_offer</code> works with any wallet, so the player trades with an NPC exactly the way NPCs trade with each other:</p>
+
+<pre><code># Offer 3 gold for 1 bread. they_give is what the NPC receives.
+var result := baker.receive_offer(player_wallet, {"gold": 3}, {"bread": 1})
+if result.accepted:
+	print("Deal: ", result.reason)
+else:
+	print("Refused: ", result.reason)</code></pre>
+
+      <p>The NPC accepts or refuses for the same reasons it would with anyone else, and it can't be talked into selling something it can't replace.</p>
+
+      <figure>
+        <video src="../assets/img/offers-from-player.mp4" controls muted playsinline></video>
+        <figcaption>NPCs answering offers from the player, each with a reason.</figcaption>
+      </figure>
+
+      <h2>Coordination without a central planner</h2>
+      <p>Each NPC plans alone and only sees its own wallet. That keeps planning cheap, but on its own it deadlocks. A hungry farmer plans to buy bread, but the baker has none. The baker waits for grain, but the farmer is busy trying to buy bread. Neither knows the other is waiting.</p>
+      <p>One fix is to plan for everyone at once. That finds the best overall plan, but the search grows with every NPC added, and a shared plan goes stale as soon as one NPC changes course. Instead, the extension uses demand signals, close to the Contract Net Protocol: NPCs keep planning alone, but announce what they're missing.</p>
+      <p>Before a plan is used, its first step is checked against the market. If it's a trade nobody can serve right now, the trader posts a demand and plans again without that action, so it does something useful in the meantime:</p>
+
+<pre><code>Ref&lt;GoapAction&gt; first = plan-&gt;get_steps()[0];
+if (first-&gt;get_kind() != GoapAction::KIND_TRADE || _market_has(first-&gt;get_produces())) {
+    return plan;
+}
+_post_demands_for(first-&gt;get_produces());
+waiting_for.push_back(economy_amounts::to_text(first-&gt;get_produces()));
+usable.erase(first);</code></pre>
+
+      <p>Traders that can produce a demanded item with their own work get a "Demand" goal for it, slotted in among their need goals by <code>demand_priority</code>. Demands expire after <code>demand_duration</code>, so stale ones don't linger. The chain sorts itself out: a demand for bread leads to a demand for grain, the farmer farms, the baker bakes, and the farmer buys his bread.</p>
+
+      <figure>
+        <video src="../assets/img/demand-chain.mp4" controls muted playsinline></video>
+        <figcaption>Bread demand → grain demand → farming → baking → the farmer buys bread.</figcaption>
+      </figure>
+
+      <p>A few settings keep the economy itself healthy. Fallback goals must not ask for more gold than exists, or nobody trades. Producers need a <code>work_value</code> above zero, or they stop selling the moment their surplus is gone. And prices have to let every role break even; in the demo, bread is worth 2.4× water and grain 1.2× water.</p>
+
+      <h2>Adding content without code</h2>
+      <p>To test the "no C++ needed" claim, the <code>goap_firewood</code> scene adds a whole new production chain using only the inspector: a <code>Warmth</code> need, a <code>firewood</code> item, three actions and a Woodcutter NPC. Nothing else changes, and the Woodcutter starts selling firewood to the Baker on its own.</p>
+
+      <figure>
+        <video src="../assets/img/resource-addition-through-inspector.mp4" controls muted playsinline></video>
+        <figcaption>Adding warmth, firewood and a woodcutter, entirely in the inspector.</figcaption>
+      </figure>
+
+      <h2>Performance: 9 to 900 NPCs</h2>
+      <p>The extension is instrumented for the Tracy profiler (v0.13.0). Building with <code>scons tracy=yes</code> adds the profiler; without it, the markers compile to nothing. The stress scene runs 9 to 900 traders, in one shared market or in markets of 30, with <code>instant_steps</code> on so only the extension is measured.</p>
+      <p>Planning is cheap: a plan search takes about 10 µs and judging an offer about 33 µs. The real costs were elsewhere: <code>NeedsComponent::decay</code>, which runs for every NPC every frame, and <code>_collect_market_demands</code>, which made up 86% of <code>make_plan</code> and is O(N²) within one market.</p>
+      <p>The fix for the demand scan was simple. Most traders have no demands most of the time, so they're skipped before any work is done:</p>
+
+<pre><code>// Most traders have no demands most of the time. Checking that first skips building
+// a Dictionary for them, which made this scan the most expensive part of make_plan.
+if (!other || other == this || other-&gt;posted_demands.is_empty()) {
+    continue;
+}</code></pre>
+
+      <p>That cut each call by 72%. Together with caching signal names as <code>StringName</code>s and only looking up the wallet once a need crosses its threshold, the results at 900 NPCs are:</p>
+
+      <table>
+        <tr><th>Metric</th><th>Before</th><th>After</th></tr>
+        <tr><td>Extension cost per frame, 900 NPCs</td><td>3.1 ms</td><td>1.4 ms (−54%)</td></tr>
+        <tr><td>Cost growth from 300 → 900 NPCs</td><td>5.5×</td><td>4.1×</td></tr>
+      </table>
+
+      <figure>
+        <img src="../assets/img/tracy-compare-opt2-demand-scan.png" alt="Tracy comparison before and after skipping traders without demands">
+        <figcaption>Tracy comparison before and after the demand-scan change.</figcaption>
+      </figure>
+
+      <p>The economy stayed healthy at every size: at most 2% of needs were ever urgent, and no need ever reached 0. The spikes in the profile come from the stress setup, not the extension: every trader starts with identical needs, so they all plan in the same frame.</p>
+
+      <figure>
+        <video src="../assets/img/stress_test_demo.mp4" controls muted playsinline></video>
+        <figcaption>The stress test with hundreds of traders.</figcaption>
+      </figure>
+
+      <h2>Limitations and next steps</h2>
+      <p>Current limitations:</p>
+      <ul>
+        <li>Only the first step of a plan is checked against the market; later steps depend on what the market looks like by then.</li>
+        <li>Demand covers goods nobody has, not goods an NPC can't afford. Credit or barter would close that gap.</li>
+        <li>An NPC with money and no needs will buy anything offered at a fair price. A per-item limit would fix that.</li>
+      </ul>
+      <p>What I'd build next:</p>
+      <ul>
+        <li>Lazy decay: store a value and a timestamp and schedule threshold crossings, instead of ticking every need every frame.</li>
+        <li>Market indexes, to remove the O(N²) demand scan.</li>
+        <li>Level of detail for NPCs far from the player.</li>
+        <li>Dynamic pricing driven by demand.</li>
+      </ul>
+
+      <h2>Try it</h2>
+      <p>The code is on <a href="https://github.com/Yungsaas/Godot-Economy-System">GitHub</a>. Open <code>test_project</code> in Godot 4.4 for the walking demo, the automated checks and the stress test. The <a href="https://github.com/Yungsaas/Godot-Economy-System/wiki">wiki</a> explains how to set up your own traders, items and needs.</p>
+
+      <h2>References</h2>
+      <ul>
+        <li>J. Orkin, "Three States and a Plan: The A.I. of F.E.A.R.", GDC 2006. <a href="https://www.gamedevs.org/uploads/three-states-plan-ai-of-fear.pdf">pdf</a></li>
+        <li>T. Humphreys, "Exploring HTN Planners through Example", <em>Game AI Pro</em>. <a href="https://www.gameaipro.com/GameAIPro/GameAIPro_Chapter12_Exploring_HTN_Planners_through_Example.pdf">pdf</a></li>
+        <li>A. Patel, "Introduction to the A* Algorithm", Red Blob Games. <a href="https://www.redblobgames.com/pathfinding/a-star/introduction.html">link</a></li>
+        <li>A. Torreño, E. Onaindia, A. Komenda, M. Štolba, "Cooperative Multi-Agent Planning: A Survey", <em>ACM Computing Surveys</em> 50(6), 2017. <a href="https://doi.org/10.1145/3128584">doi</a></li>
+        <li>R. G. Smith, "The Contract Net Protocol", <em>IEEE Transactions on Computers</em> C-29(12), 1980. <a href="https://doi.org/10.1109/TC.1980.1675516">doi</a></li>
+        <li>W. S. Jevons, <em>Money and the Mechanism of Exchange</em>, 1875.</li>
+        <li>Tracy Profiler. <a href="https://github.com/wolfpld/tracy">github</a></li>
+      </ul>
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">© 2026 Mika Halbauer</div>
+  </footer>
+</body>
+</html>
